@@ -14,9 +14,8 @@ namespace ClientChatting
 {
     public partial class Form1 : Form
     {
-        private static Socket clientSocket;
-        IPEndPoint ep_other;
-        private static byte[] _buffer;
+        private static TcpClient client;
+        private static byte[] buf;
 
         public Form1()
         {
@@ -25,8 +24,7 @@ namespace ClientChatting
 
         private void Form1_Load(object sender, EventArgs e)
         {
-            clientSocket = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
-            _buffer = new byte[1024];
+            buf = new byte[1024];
             tb_otherIP.Text = getMyIPAddress();
             tb_myName.Text = getMyIPAddress();
         }
@@ -48,15 +46,22 @@ namespace ClientChatting
                 MessageBox.Show("텍스트를 입력하세요.");
             }
 
-            byte[] buffer = Encoding.UTF8.GetBytes(tb_myName.Text + "," + tb_send.Text);
-            clientSocket.Send(buffer);
-            lb_chat.Items.Add("Client("+tb_myName.Text+") : " + tb_send.Text);
-            tb_send.Text = "";
+            try
+            {
+                byte[] buffer = Encoding.UTF8.GetBytes(tb_myName.Text + "," + tb_send.Text);
+                client.GetStream().Write(buffer, 0, buffer.Length);
+                lb_chat.Items.Add("Client(" + tb_myName.Text + ") : " + tb_send.Text);
+                tb_send.Text = "";
+            }
+            catch (Exception ex)
+            {
+                lb_chat.Items.Add("From btn_send_Click: " + ex.Message);
+            }
         }
 
         private void btn_connect_Click(object sender, EventArgs e)
         {
-            if (clientSocket.Connected)
+            if (client != null)
             {
                 MessageBox.Show("이미 연결되어 있습니다");
                 return;
@@ -64,32 +69,27 @@ namespace ClientChatting
 
             try
             {
-                ep_other = new IPEndPoint(IPAddress.Parse(tb_otherIP.Text), Convert.ToInt32(tb_otherPort.Text));
-                clientSocket.Connect(ep_other);
-                clientSocket.BeginReceive(_buffer, 0, _buffer.Length, SocketFlags.None, new AsyncCallback(ReceiveCallback), clientSocket);
+                client = new TcpClient(tb_otherIP.Text, int.Parse(tb_otherPort.Text));
+                client.GetStream().BeginRead(buf, 0, buf.Length, new AsyncCallback(ReceiveCallback), client);
+
+                lb_chat.Items.Add("Server와 연결되었습니다");
+                btn_connect.Text = "연결됨";
+                btn_connect.Enabled = false;
+                btn_send.Enabled = true;
             }
-            catch (Exception)
+            catch (Exception ex)
             {
-                MessageBox.Show("Client Connect Error");
+                MessageBox.Show("From btn_connect_Click: " + ex.Message);
             }
-            lb_chat.Items.Add("Server와 연결되었습니다");
-            btn_connect.Text = "연결됨";
-            btn_connect.Enabled = false;
         }
                
         private void ReceiveCallback(IAsyncResult ar)
         {
-            Socket socket = (Socket)ar.AsyncState;
-            int received = socket.EndReceive(ar);
-            byte[] dataBuf = new byte[received];
-            Array.Copy(_buffer, dataBuf, received);
+            int bytes = client.GetStream().EndRead(ar);
+            string strRead = Encoding.UTF8.GetString(buf, 0, bytes);
+            lb_chat.Items.Add("Server : " + strRead);
 
-            string text = Encoding.UTF8.GetString(dataBuf);
-
-            lb_chat.Items.Add("Server : " + text);
-                                
-            socket.BeginReceive(_buffer, 0, _buffer.Length, SocketFlags.None, new AsyncCallback(ReceiveCallback), socket);
-
+            client.GetStream().BeginRead(buf, 0, buf.Length, new AsyncCallback(ReceiveCallback), client);
         }      
     }
 }

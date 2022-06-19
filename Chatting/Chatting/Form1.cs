@@ -14,13 +14,11 @@ namespace Chatting
 {
     public partial class Form1 : Form
     {
-        IPEndPoint ep_my;
         public const int MessageSize = 1024;
-        byte[] byteMessage;
 
-        private static Socket serverSocket;
-        private static byte[] _buffer = new byte[1024];
-        private static List<Socket> _clientSockets = new List<Socket>();
+        private static TcpListener listener;
+        private static byte[] buf = new byte[1024];
+        private static List<TcpClient> clients = new List<TcpClient>();
 
         public Form1()
         {
@@ -31,11 +29,9 @@ namespace Chatting
         {
             try
             {
-                serverSocket = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
-
-                //폼 로드되면 내 IP주소 가져오기
-                tb_myIP.Text = getMyIPAddress();
-                tb_myName.Text = getMyIPAddress();
+                //폼 로드 시 local computer의 IP Address를 가져와, IP와 이름 textbox의 text로 초기화 합니다.
+                tb_myIP.Text = GetMyIPAddress();
+                tb_myName.Text = GetMyIPAddress();
             }
             catch(Exception ex)
             {
@@ -44,7 +40,7 @@ namespace Chatting
 
         }
 
-        public string getMyIPAddress()
+        public string GetMyIPAddress()
         {
             var host = Dns.GetHostEntry(Dns.GetHostName());
             foreach (var ip in host.AddressList)
@@ -52,6 +48,7 @@ namespace Chatting
                 if (ip.AddressFamily == AddressFamily.InterNetwork)
                     return ip.ToString();
             }
+            //위 loop에서 return되지 않았을 시, 예외를 발생시킵니다.
             throw new Exception("Ipv4주소 없습니다.");
         }
 
@@ -59,10 +56,12 @@ namespace Chatting
         {
             try
             {
-                 ep_my = new IPEndPoint(IPAddress.Parse(tb_myIP.Text), Convert.ToInt32(tb_myPort.Text));
-                serverSocket.Bind(ep_my);
-                serverSocket.Listen(5);
-                serverSocket.BeginAccept(new AsyncCallback(AcceptCallback), null);
+                listener = new TcpListener(new IPEndPoint(IPAddress.Parse(tb_myIP.Text), int.Parse(tb_myPort.Text)));
+                listener.Start();
+
+                //연결 시도를 받아들이는 비동기 작업을 시작하도록 합니다.
+                //파라미터: AcceptCallback 프로시져를 수행할 대리자, 추가정보는 없습니다.
+                listener.BeginAcceptTcpClient(new AsyncCallback(AcceptCallback), null);
 
                 btn_connect.Text = "시작";
                 btn_connect.Enabled = false;
@@ -75,30 +74,50 @@ namespace Chatting
 
         private void AcceptCallback(IAsyncResult ar)
         {
-            Socket socket = serverSocket.EndAccept(ar);
-            _clientSockets.Add(socket);
-            lb_chat.Items.Add("Client(" + socket.RemoteEndPoint + ") 와 연결되었습니다");
-            
-            socket.BeginReceive(_buffer, 0, _buffer.Length, SocketFlags.None, new AsyncCallback(ReceiveCallback), socket);
-            serverSocket.BeginAccept(new AsyncCallback(AcceptCallback), null);
-
+            try
+            {
+                //비동기적으로 접속 시도를 처리하고 해당 TcpClient 객체를 얻습니다.
+                TcpClient client = listener.EndAcceptTcpClient(ar);
+                clients.Add(client);
+                lb_chat.Items.Add("Client(" + client.Client.RemoteEndPoint + ") 와 연결되었습니다");
+                
+                //client의 네트워크 스트림에서 비동기 수신 작업을 시작하도록 합니다.
+                //파라미터: 데이터를 받을 byte배열, 대리자, 추가정보 client
+                client.GetStream().BeginRead(buf, 0, buf.Length, new AsyncCallback(ReceiveCallback), client);
+            }
+            catch (Exception ex)
+            {
+                lb_chat.Items.Add("예외: " + ex.Message);
+            }
+            finally
+            {
+                //다시 접속 시도 처리를 시작합니다.
+                listener.BeginAcceptTcpClient(new AsyncCallback(AcceptCallback), null);
+            }
         }
 
         private void ReceiveCallback(IAsyncResult ar)
         {
-            Socket socket = (Socket)ar.AsyncState;
-            int received = socket.EndReceive(ar);
-            byte[] dataBuf = new byte[received];
-            Array.Copy(_buffer, dataBuf, received);
+            try
+            {
+                //추가정보로 받은 TcpClient 객체를 가져옵니다.
+                TcpClient client = (TcpClient)ar.AsyncState;
+                //ar: 완료해야 하는 비동기 요청에 대한 레퍼런스
+                int bytes = client.GetStream().EndRead(ar);
 
-            string text = Encoding.UTF8.GetString(dataBuf);
-            string searchText = ",";
-            string clientName = text.Substring(0, text.IndexOf(searchText));
-            string clientMessage = text.Substring(text.IndexOf(searchText) + 1);
+                string strRead = Encoding.UTF8.GetString(buf, 0, bytes);
+                string searchText = ",";
+                string clientName = strRead.Substring(0, strRead.IndexOf(searchText));
+                string clientMessage = strRead.Substring(strRead.IndexOf(searchText) + 1);
 
-            lb_chat.Items.Add("Client(" + clientName + ") : " + clientMessage);
-       
-            socket.BeginReceive(_buffer, 0, _buffer.Length, SocketFlags.None, new AsyncCallback(ReceiveCallback), socket);
+                lb_chat.Items.Add("Client(" + clientName + ") : " + clientMessage);
+                //다시 수신을 시작합니다.
+                client.GetStream().BeginRead(buf, 0, buf.Length, new AsyncCallback(ReceiveCallback), client);
+            }
+            catch (Exception ex)
+            {
+                //lb_chat.Items.Add("From ReceiveCallback: " + ex.Message);
+            }
         }
        
         private void btn_send_Click(object sender, EventArgs e)
@@ -110,18 +129,19 @@ namespace Chatting
 
             byte[] buffer = Encoding.UTF8.GetBytes(tb_send.Text);
 
-            for (int i = _clientSockets.Count - 1; i >= 0; i--) //Connect된 Client에게 데이터 전송
+            //client 리스트를 참조하여, 메시지를 보냅니다.
+            for (int i = clients.Count - 1; i >= 0; i--) //Connect된 Client에게 데이터 전송
             {
-                Socket socket = _clientSockets[i];
+                TcpClient client = clients[i];
                 try 
                 { 
-                    socket.Send(buffer); 
+                    client.GetStream().Write(buffer, 0, buffer.Length);
                 }
                 catch (Exception)
                 {
-                    MessageBox.Show("Clients Send Error");
-                    socket.Dispose();//해제
-                    _clientSockets.RemoveAt(i);//리스트에서 삭제
+                    //MessageBox.Show("응답 없는 클라이언트가 있습니다. 삭제됩니다.");
+                    client.Close();
+                    clients.RemoveAt(i);
                 }
             }
             lb_chat.Items.Add("Server : " + tb_send.Text);
